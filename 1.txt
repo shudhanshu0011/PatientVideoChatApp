@@ -1,0 +1,320 @@
+import { Component, ViewChild, ElementRef } from '@angular/core';
+import { HttpClient } from '@angular/common/http';
+import * as signalR from '@microsoft/signalr';
+
+@Component({
+  selector: 'app-root',
+  templateUrl: 'app.component.html',
+  styleUrls: ['app.component.scss'],
+})
+export class AppComponent {
+  doctors: any[] = [];
+  patients: any[] = [];
+  currentDoctor: any = null;
+  selectedUser: any = null;
+  drawerExpanded: boolean = false;
+
+  peerConnection: RTCPeerConnection | null = null;
+  localStream: MediaStream | null = null;
+  remoteStream: MediaStream | null = null;
+  socket: WebSocket | null = null;
+
+  enabledPatients: Set<string> = new Set();
+  connection: signalR.HubConnection | null = null;
+
+  @ViewChild('localVideo', { static: true }) localVideo!: ElementRef;
+  @ViewChild('remoteVideo', { static: true }) remoteVideo!: ElementRef;
+
+  constructor(private http: HttpClient) {
+    console.log('Initializing AppComponent');
+    this.fetchDoctors();
+    this.connectToSignalR();
+  }
+
+  fetchDoctors() {
+    console.log('Fetching doctors...');
+    this.http.get<any[]>('http://localhost:5113/api/GetDoctors').subscribe(
+      (data) => {
+        console.log('Doctors fetched successfully:', data);
+        this.doctors = data;
+        if (this.doctors.length > 0) {
+          this.currentDoctor = this.doctors[0];
+          this.fetchPatientsForDoctor(this.currentDoctor.id);
+        }
+      },
+      (error) => {
+        console.error('Error fetching doctors:', error);
+      }
+    );
+  }
+
+  onDoctorChange() {
+    console.log('Doctor changed:', this.currentDoctor);
+    if (this.currentDoctor) {
+      this.fetchPatientsForDoctor(this.currentDoctor.id);
+    }
+  }
+
+  fetchPatientsForDoctor(doctorId: number) {
+    console.log('Fetching patients for doctor ID:', doctorId);
+    this.http.get<any[]>(`http://localhost:5113/api/GetPatientsByDoctor/${doctorId}/patients`).subscribe(
+      (data) => {
+        console.log('Patients fetched successfully:', data);
+        this.patients = data;
+      },
+      (error) => {
+        console.error('Error fetching patients:', error);
+      }
+    );
+  }
+
+  connectToSignalR() {
+    try {
+      console.log('Connecting to SignalR...');
+      this.connection = new signalR.HubConnectionBuilder()
+        .withUrl('http://localhost:5113/video-chat', { withCredentials: true })
+        .build();
+
+      this.connection.start().then(() => {
+        console.log('SignalR connection established');
+        if (this.connection && this.currentDoctor) {
+          this.connection.invoke('JoinDoctor', this.currentDoctor.id.toString());
+        }
+      }).catch((err) => {
+        console.error('Error connecting to SignalR:', err);
+      });
+
+      this.connection.on('ReceivePatientList', (patientsFromWS: any[]) => {
+        console.log('Received patient list from SignalR:', patientsFromWS);
+        this.updateEnabledPatients(patientsFromWS);
+      });
+
+      this.connection.on("ReceiveAnswer", (answerJson) => {
+          try {
+              console.log("Received answer:", answerJson);
+      
+              const { answer, patientId, doctorId } = JSON.parse(answerJson);
+      
+              this.handleAnswer(answer);
+          } catch (error) {
+              console.error("Error processing received answer:", error);
+          }
+      });
+
+      this.connection.on("ReceiveICECandidate", (candidateJson: string) => {
+        try {
+            console.log("Received ICE candidate:", candidateJson);
+            const { doctorId, patientId, iceCandidate } = JSON.parse(candidateJson);
+    
+            if (this.peerConnection) {
+                const candidate = new RTCIceCandidate(iceCandidate);
+                this.peerConnection.addIceCandidate(candidate)
+                    .then(() => console.log("ICE candidate added successfully."))
+                    .catch((error) => console.error("Error adding ICE candidate:", error));
+            } else {
+                console.error('PeerConnection is not initialized.');
+            }
+        } catch (error) {
+            console.error('Error processing received ICE candidate:', error);
+        }
+      });
+    
+    } catch (error) {
+      console.error('Error in connectToSignalR:', error);
+    }
+  }
+
+  refreshPatientList() {
+    try {
+      console.log('Refreshing patient list...');
+      if (this.connection) {
+        this.connection.invoke('GetUpdatedPatientList', this.currentDoctor.id.toString())
+          .then(() => {
+            console.log('Patient list refreshed successfully');
+          })
+          .catch((err) => {
+            console.error('Error refreshing patient list:', err);
+          });
+      }
+    } catch (error) {
+      console.error('Error in refreshPatientList:', error);
+    }
+  }
+
+  updateEnabledPatients(patientsFromWS: any[]) {
+    try {
+      console.log('Updating enabled patients...');
+      const patientIds = new Set(patientsFromWS);
+
+      this.enabledPatients.clear();
+
+      this.patients.forEach((patient) => {
+        if (patientIds.has(patient.id.toString())) {
+          this.enabledPatients.add(patient.id);
+        }
+      });
+
+      this.checkPatientsStatus();
+    } catch (error) {
+      console.error('Error in updateEnabledPatients:', error);
+    }
+  }
+
+  checkPatientsStatus() {
+    try {
+      console.log('Checking patient status...');
+      this.patients.forEach((patient) => {
+        patient.videoCallScheduled = this.enabledPatients.has(patient.id);
+      });
+    } catch (error) {
+      console.error('Error in checkPatientsStatus:', error);
+    }
+  }
+
+  startCall(user: any) {
+    try {
+      console.log('Starting call for user:', user);
+      if (!user.videoCallScheduled) {
+        console.warn('Video call not scheduled for this user');
+        return;
+      }
+
+      this.selectedUser = user;
+
+      this.initializeVideoFeeds();
+      this.initializeWebRTC();
+      
+      this.drawerExpanded = false;
+    } catch (error) {
+      console.error('Error in startCall:', error);
+    }
+  }
+
+  initializeWebRTC() {
+    try {
+      console.log('Initializing WebRTC...');
+      if (!this.connection) return;
+
+      this.peerConnection = new RTCPeerConnection({
+        iceServers: [{ urls: "stun:stun.l.google.com:19302" }]
+      });
+
+      this.peerConnection.onicecandidate = (event) => {
+        if (event.candidate) {
+          console.log('ICE candidate:', event.candidate);
+          this.sendICECandidate(event.candidate);
+        }
+      };
+
+      this.peerConnection.ontrack = (event) => {
+        console.log('Track received:', event.streams[0]);
+        this.remoteStream = event.streams[0];
+        this.remoteVideo.nativeElement.srcObject = this.remoteStream;
+      };
+
+      this.sendOffer();
+    } catch (error) {
+      console.error('Error in initializeWebRTC:', error);
+    }
+  }
+
+  sendOffer() {
+    try {
+      console.log('Sending offer...');
+      const offer = this.peerConnection?.createOffer();
+      offer?.then((description) => {
+        console.log('Offer created:', description);
+        this.peerConnection?.setLocalDescription(description);
+  
+        if (this.selectedUser) {
+          this.connection?.send(
+            'SendOffer',
+            JSON.stringify({
+              patientId: this.selectedUser.id.toString(),
+              doctorId: this.currentDoctor.id.toString(),
+              offer: JSON.stringify(description),
+            })
+          );
+          console.log({
+            patientId: this.selectedUser.id.toString(),
+            doctorId: this.currentDoctor.id.toString(),
+            offer: JSON.stringify(description),
+          });
+        } else {
+          console.error('No selected user for offer');
+        }
+      }).catch((error) => {
+        console.error('Error creating offer:', error);
+      });
+    } catch (error) {
+      console.error('Error in sendOffer:', error);
+    }
+  }  
+
+  handleAnswer(answer: string) {
+    try {
+        console.log('Handling answer:', answer);
+
+        const parsedAnswer = typeof answer === 'string' ? JSON.parse(answer) : answer;
+
+        if (parsedAnswer && parsedAnswer.sdp && parsedAnswer.type) {
+            const rtcAnswer = new RTCSessionDescription({
+                type: parsedAnswer.type,
+                sdp: parsedAnswer.sdp
+            });
+
+            if (this.peerConnection) {
+                this.peerConnection.setRemoteDescription(rtcAnswer)
+                    .then(() => console.log("Remote description set successfully for answer. ", rtcAnswer))
+                    .catch(error => console.error("Error setting remote description for answer:", error));
+            } else {
+                console.error('PeerConnection is not initialized.');
+            }
+        } else {
+            console.error('Invalid answer object: Missing "type" or "sdp".');
+        }
+    } catch (error) {
+        console.error('Error in handleAnswer:', error);
+    }
+  }
+
+  sendICECandidate(candidate: RTCIceCandidate) {
+    try {
+      console.log('Sending ICE candidate:', candidate);
+      if (this.selectedUser) {
+        this.connection?.send(
+          'SendICECandidate',
+          JSON.stringify({ doctorId: this.currentDoctor.id.toString(), patientId: this.selectedUser.id, iceCandidate: candidate })
+        );
+      } else {
+        console.error('No selected user for ICE candidate');
+      }
+    } catch (error) {
+      console.error('Error in sendICECandidate:', error);
+    }
+  }
+
+  initializeVideoFeeds() {
+    try {
+      console.log('Initializing video feeds...');
+      navigator.mediaDevices.getUserMedia({ video: true, audio: true }).then((stream) => {
+        console.log('Local stream obtained:', stream);
+        this.localStream = stream;
+        this.localVideo.nativeElement.srcObject = this.localStream;
+
+        this.localStream.getTracks().forEach((track) => {
+          this.peerConnection?.addTrack(track, this.localStream!);
+        });
+      }).catch((error) => {
+        console.error('Error accessing media devices:', error);
+      });
+    } catch (error) {
+      console.error('Error in initializeVideoFeeds:', error);
+    }
+  }
+
+  toggleDrawer() {
+    console.log('Toggling drawer...');
+    this.drawerExpanded = !this.drawerExpanded;
+  }
+}
