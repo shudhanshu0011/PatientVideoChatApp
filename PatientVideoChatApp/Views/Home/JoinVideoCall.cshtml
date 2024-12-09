@@ -1,0 +1,52 @@
+﻿@model PatientVideoChatApp.Models.VideoCallModal
+
+@{
+    ViewData["Title"] = "Join Video Call";
+}
+
+<div class="container mt-5">
+    <div class="text-center">
+        <h1 class="display-4">Join Video Call</h1>
+    </div>
+
+    <input type="hidden" id="patientId" value="@Model.PatientId" />
+    <input type="hidden" id="doctorId" value="@Model.DoctorId" />
+
+    <div class="mt-4 text-center" id="validateSection">
+        <p>Please enter the password to join the call:</p>
+        <input type="password" id="callPassword" class="form-control w-50 mx-auto" placeholder="Enter Password" />
+        <button id="validatePasswordButton" class="btn btn-success mt-3">Validate Password</button>
+        <div id="passwordError" class="text-danger mt-2" style="display: none;">Incorrect Password!</div>
+    </div>
+
+    <div id="videoCallSection" class="mt-5" style="display: none;">
+        <div class="text-center">
+            <h2>Call Start Time: @Model.StartTime</h2>
+        </div>
+        <div class="mt-4 text-center">
+            <video id="localVideo" autoplay muted playsinline class="border rounded shadow" width="300"></video>
+            <video id="remoteVideo" autoplay playsinline class="border rounded shadow" width="300"></video>
+        </div>
+        <div class="mt-4 text-center">
+            <button id="endCallButton" class="btn btn-danger" disabled>End Call</button>
+        </div>
+    </div>
+</div>
+
+<script src="https://code.jquery.com/jquery-3.7.1.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/microsoft-signalr/7.0.12/signalr.min.js"></script>
+<script src="~/scripts/joinvideocall.js"></script>
+<script>
+    document.getElementById("validatePasswordButton").addEventListener("click", function () {
+        const enteredPassword = document.getElementById("callPassword").value;
+        const correctPassword = "@Model.CallPassword";
+
+        if (enteredPassword === correctPassword) {
+            document.getElementById("videoCallSection").style.display = "block";
+            document.getElementById("validateSection").style.display = "none";
+        } else {
+            document.getElementById("validateSection").style.display = "block";
+            document.getElementById("passwordError").style.display = "block";
+        }
+    });
+</script>
